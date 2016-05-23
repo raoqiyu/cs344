@@ -54,11 +54,16 @@ void rgba_to_greyscale(const uchar4* const rgbaImage,
   // blockDim.x  : the numCols in the images
   // blockIdx.x  : the row index of this pixel in image  
   // threadIdx.x : the col index of this pixel in image
-  // in 2-D way  : this pixel is at rgbaImage[blockIdx.x][threadIdx.x]
-  // in 1-D way  : this pixel is at rgbaImage[blockIdx.x*blockDim.x+threadIdx.x]
-  int offset = blockIdx.x * blockDim.x + threadIdx.x;
-  uchar4 rgbxPixel = rgbaImage[offset];
-  greyImage[offset] = .299f*rgbaPixel.x + .587f*rgbaPixel.y + .114f*rgbaPixel.z;
+  // in 2-D way  : this pixel is at rgbaImage[row_idx][col_idx]
+  // in 1-D way  : this pixel is at rgbaImage[blockIdx.x*row_idx+col_idx]
+  int row_idx = blockDim.x;
+  int col_idx = threadIdx.x;
+  int offset = blockIdx.x * row_idx + col_idx;
+  // Check if this position is valid or not
+  if(row_idx < numRows && col_idx < numCols){
+	  uchar4 rgbaPixel = rgbaImage[offset];
+	  greyImage[offset] = (unsigned char)(.299f*rgbaPixel.x + .587f*rgbaPixel.y + .114f*rgbaPixel.z);
+  }
 }
 
 void your_rgba_to_greyscale(const uchar4 * const h_rgbaImage, uchar4 * const d_rgbaImage,
