@@ -102,6 +102,10 @@
 
 #include "utils.h"
 
+#define O_TILE_WIDTH 8
+#define BLOCK_WIDTH (O_TILE_WIDTH + 8)
+
+
 __global__
 void gaussian_blur(const unsigned char* const inputChannel,
                    unsigned char* const outputChannel,
@@ -129,6 +133,47 @@ void gaussian_blur(const unsigned char* const inputChannel,
   // the value is out of bounds), you should explicitly clamp the neighbor values you read
   // to be within the bounds of the image. If this is not clear to you, then please refer
   // to sequential reference solution for the exact clamping semantics you should follow.
+
+
+  
+	// Note: this operation is kind of convolution
+	int tx = threadIdx.x;
+	int ty = threadIdx.y;
+	int row_o = blockIdx.y*O_TILE_WIDTH + ty;
+	int col_o = blockIdx.x*O_TILE_WIDTH + tx;
+
+	// We need load more data into shared memory to do calculation
+	// we need load (O_TILE_WIDTH + filterWidth-1)^2  data into shared memeory, filterWidth is 9 here
+	// to calculate an output at row_o, we should begin at row_o-(filterWidth/2)
+	int row_i = row_o - 4;
+	int col_i = col_o - 4;
+
+	// Fast memory access
+	// load all data into shared memory
+	__shared__ float Ns[BLOCK_WIDTH][BLOCK_WIDTH];
+	//clamp to boundary of the image
+	row_i = min(max(row_i,0),numRows-1);
+	col_i = min(max(col_i,0),numCols-1);
+	int offset = row_i*numCols + col_i;
+	Ns[ty][tx]  =  inputChannel[offset];
+
+	
+	// make sure that all needed data are loaded into shared memory
+	__syncthreads();
+	
+	// do calculation, only O_TILE_WIDTH*O_TILE_WIDTH threads participate in calculating outputs
+    // only safe threads participate in writing output
+	float data = 0.0f;
+	if( tx < O_TILE_WIDTH && ty < O_TILE_WIDTH && row_o < numRows && col_o < numCols){
+
+		for(int i = 0; i < filterWidth; i++)
+			for(int j = 0; j < filterWidth; j++)
+				data += filter[i*filterWidth+j] * Ns[i+ty][j+tx];
+		
+		//if(row_o < numRows && col_o < numCols)
+			outputChannel[row_o*numCols+col_o] = data;
+	}
+	
 }
 
 //This kernel takes in an image represented as a uchar4 and splits
@@ -152,6 +197,22 @@ void separateChannels(const uchar4* const inputImageRGBA,
   // {
   //     return;
   // }
+  
+	int row = blockIdx.y*O_TILE_WIDTH + threadIdx.y;
+	int col = blockIdx.x*O_TILE_WIDTH + threadIdx.x;
+	// do calculation, only O_TILE_WIDTH*O_TILE_WIDTH threads participate in calculating outputs
+	// only safe threads participate in writing output
+	if( threadIdx.y < O_TILE_WIDTH && threadIdx.x < O_TILE_WIDTH &&  (row < numRows) && (col < numCols) ){
+		// Note: this operation is kind of transpose pattern
+
+		// we set block number and size under the 1-channel position, so each thread should load 3 elements
+		// ignore the 4th channel (alpha value)
+		int offset = row*numCols + col;
+		redChannel[offset]   =  inputImageRGBA[offset].x;
+		greenChannel[offset] =  inputImageRGBA[offset].y;
+		blueChannel[offset]  =  inputImageRGBA[offset].z;
+	}
+  
 }
 
 //This kernel takes in three color channels and recombines them
@@ -165,24 +226,24 @@ void recombineChannels(const unsigned char* const redChannel,
                        int numRows,
                        int numCols)
 {
-  const int2 thread_2D_pos = make_int2( blockIdx.x * blockDim.x + threadIdx.x,
-                                        blockIdx.y * blockDim.y + threadIdx.y);
+	int row = blockIdx.y*O_TILE_WIDTH + threadIdx.y;
+	int col = blockIdx.x*O_TILE_WIDTH + threadIdx.x;
+	// do calculation, only O_TILE_WIDTH*O_TILE_WIDTH threads participate in calculating outputs
+	// only safe threads participate in writing output
+	if( threadIdx.y < O_TILE_WIDTH && threadIdx.x < O_TILE_WIDTH && (row < numRows) && (col < numCols) ){
+		// Note: this operation is kind of transpose pattern
+		const int thread_1D_pos = row*numCols + col;
 
-  const int thread_1D_pos = thread_2D_pos.y * numCols + thread_2D_pos.x;
+		unsigned char red   = redChannel[thread_1D_pos];
+		unsigned char green = greenChannel[thread_1D_pos];
+		unsigned char blue  = blueChannel[thread_1D_pos];
 
-  //make sure we don't try and access memory outside the image
-  //by having any threads mapped there return early
-  if (thread_2D_pos.x >= numCols || thread_2D_pos.y >= numRows)
-    return;
+		//Alpha should be 255 for no transparency
+		uchar4 outputPixel = make_uchar4(red, green, blue, 255);
 
-  unsigned char red   = redChannel[thread_1D_pos];
-  unsigned char green = greenChannel[thread_1D_pos];
-  unsigned char blue  = blueChannel[thread_1D_pos];
+		outputImageRGBA[thread_1D_pos] = outputPixel;
+	}
 
-  //Alpha should be 255 for no transparency
-  uchar4 outputPixel = make_uchar4(red, green, blue, 255);
-
-  outputImageRGBA[thread_1D_pos] = outputPixel;
 }
 
 unsigned char *d_red, *d_green, *d_blue;
@@ -206,10 +267,13 @@ void allocateMemoryAndCopyToGPU(const size_t numRowsImage, const size_t numColsI
   //be able to tell if anything goes wrong
   //IMPORTANT: Notice that we pass a pointer to a pointer to cudaMalloc
 
+  checkCudaErrors(cudaMalloc(&d_filter, sizeof(float) * filterWidth * filterWidth));
+
   //TODO:
   //Copy the filter on the host (h_filter) to the memory you just allocated
   //on the GPU.  cudaMemcpy(dst, src, numBytes, cudaMemcpyHostToDevice);
   //Remember to use checkCudaErrors!
+  checkCudaErrors(cudaMemcpy(d_filter, h_filter, sizeof(float) * filterWidth * filterWidth, cudaMemcpyHostToDevice));
 
 }
 
@@ -221,20 +285,35 @@ void your_gaussian_blur(const uchar4 * const h_inputImageRGBA, uchar4 * const d_
                         const int filterWidth)
 {
   //TODO: Set reasonable block size (i.e., number of threads per block)
-  const dim3 blockSize;
+
+	  // consider this as 2-D convolution operation with 2-D MASK, here i used tile-convolution
+	  // We need load enough elements into shared memory in kernel function, so the width of one block is the tile width + mask with - 1
+	  const dim3 blockSize(BLOCK_WIDTH,BLOCK_WIDTH);
 
   //TODO:
   //Compute correct grid size (i.e., number of blocks per kernel launch)
   //from the image size and and block size.
-  const dim3 gridSize;
+
+	  // We need enough block to cover all pixels in a image
+	  const dim3 gridSize( numCols/O_TILE_WIDTH+1, numRows/O_TILE_WIDTH+1, 1);
+
 
   //TODO: Launch a kernel for separating the RGBA image into different color channels
 
+  	separateChannels<<<gridSize, blockSize>>>(d_inputImageRGBA, numRows, numCols, d_red, d_green, d_blue);
+  
   // Call cudaDeviceSynchronize(), then call checkCudaErrors() immediately after
   // launching your kernel to make sure that you didn't make any mistakes.
   cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
   //TODO: Call your convolution kernel here 3 times, once for each color channel.
+  
+	  gaussian_blur<<<gridSize, blockSize>>>(d_red, d_redBlurred, numRows, numCols, d_filter, filterWidth);
+
+	  gaussian_blur<<<gridSize, blockSize>>>(d_green, d_greenBlurred, numRows, numCols, d_filter, filterWidth);
+
+	  gaussian_blur<<<gridSize, blockSize>>>(d_blue, d_blueBlurred, numRows, numCols, d_filter, filterWidth);
+
 
   // Again, call cudaDeviceSynchronize(), then call checkCudaErrors() immediately after
   // launching your kernel to make sure that you didn't make any mistakes.
@@ -261,4 +340,7 @@ void cleanup() {
   checkCudaErrors(cudaFree(d_red));
   checkCudaErrors(cudaFree(d_green));
   checkCudaErrors(cudaFree(d_blue));
+
+	// free filter memory
+	checkCudaErrors(cudaFree(d_filter));
 }
