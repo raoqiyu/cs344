@@ -214,20 +214,17 @@ __global__ void prefixSum_BL(const unsigned int * const d_in, unsigned int * con
 	if(tid == blockDim.x-1)
 		partial[tid] = 0;
 	for(unsigned int stride = blockDim.x/2; stride > 0; stride >>= 1){
-		// first update all idx == blockDim.x * n - 1, then (blockDim.x/2)n-1, then (blockDim.x/4)n-1 ...  
-		// finaly 2 * n - 1
-		int idx = (tid+1)*stride*2 - 1;
-		if( idx + stride  < blockDim.x)
-			partial[idx + stride] += partial[idx];
+		
+		if( (tid+1) % (stride*2) == 0){
+			unsigned int temp = partial[tid-stride];
+			partial[tid-stride] = partial[tid];
+			partial[tid] += temp;
+		}
 		// make sure all operations at one stage are done!
 		__syncthreads();
 	}
 
-	// exclusive scan
-	if(tid == 0)
-		d_out[tid] = 0;
-	else
-		d_out[tid] = partial[tid-1];	
+	d_out[tid] = partial[tid];	
 }
 
 // Scan algorithm from Course : Hetergeneous Parallel Programming
@@ -315,7 +312,7 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
 	hist<<<numRows, numCols>>>(d_logLuminance, d_bins, logLumRange, min_logLum, numBins);
 	
 	// Step 4 : prefix sum
-	prefixSum_HPP<<<1, numBins, numBins*sizeof(unsigned int)>>>(d_bins, d_cdf);
+	prefixSum_BL<<<1, numBins, numBins*sizeof(unsigned int)>>>(d_bins, d_cdf);
 
 	// free GPU memory allocation
 	checkCudaErrors(cudaFree(d_bins));
