@@ -167,10 +167,9 @@ __global__ void prefixSum_HS(const unsigned int * const d_in, unsigned int * con
 	extern __shared__ float partial[];
 
 	int tid = threadIdx.x;
-	int idx = blockIdx.x * blockDim.x + tid;
 
 	// make sure all data in this block are loaded into shared shared memory
-	partial[tid] = d_in[idx];
+	partial[tid] = d_in[tid];
 	__syncthreads();
 	
 	for(unsigned int stride = 1; stride < blockDim.x; stride <<= 1){
@@ -187,6 +186,49 @@ __global__ void prefixSum_HS(const unsigned int * const d_in, unsigned int * con
 		d_out[tid] = partial[tid-1];	
 }
 
+// Scan algorithm from Course : Hetergeneous Parallel Programming
+__global__ void prefixSum_HPP(const unsigned int * const d_in, unsigned int * const d_out)
+{
+
+	extern __shared__ float partial[];
+
+	int tid = threadIdx.x;
+
+	// make sure all data in this block are loaded into shared shared memory
+	partial[tid] = d_in[tid];
+	__syncthreads();
+	
+	// reduce step
+	for(unsigned int stride = 1; stride < blockDim.x/2; stride <<= 1){
+		// first update all idx == 2n-1, then 4n-1, then 8n-1 ...  
+		// finaly blockDim.x/2 * n - 1(only 1 value will be updated partial[blockDim.x-1])
+		int idx = (tid+1)*stride*2 - 1;
+		if( idx  < blockDim.x)
+			partial[idx] += partial[idx-stride];
+		// make sure all operations at one stage are done!
+		__syncthreads();
+	}
+
+	// Downsweep Step
+	// set identity value
+	if(tid == blockDim.x-1)
+		partial[tid] = 0;
+	for(unsigned int stride = blockDim.x/2; stride > 0; stride >>= 1){
+		// first update all idx == blockDim.x * n - 1, then (blockDim.x/2)n-1, then (blockDim.x/4)n-1 ...  
+		// finaly 2 * n - 1
+		int idx = (tid+1)*stride*2 - 1;
+		if( idx + stride  < blockDim.x)
+			partial[idx + stride] += partial[idx];
+		// make sure all operations at one stage are done!
+		__syncthreads();
+	}
+
+	// exclusive scan
+	if(tid == 0)
+		d_out[tid] = 0;
+	else
+		d_out[tid] = partial[tid-1];	
+}
 
 void your_histogram_and_prefixsum(const float* const d_logLuminance,
                                   unsigned int* const d_cdf,
@@ -225,7 +267,7 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
 	hist<<<numRows, numCols>>>(d_logLuminance, d_bins, logLumRange, min_logLum, numBins);
 	
 	// Step 4 : prefix sum
-	prefixSum_HS<<<1, numBins, numBins*sizeof(unsigned int)>>>(d_bins, d_cdf);
+	prefixSum_HPP<<<1, numBins, numBins*sizeof(unsigned int)>>>(d_bins, d_cdf);
 
 	// free GPU memory allocation
 	checkCudaErrors(cudaFree(d_bins));
