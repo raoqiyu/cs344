@@ -48,6 +48,8 @@ Only ***O_TILE_WIDTH*** \* ***O_TILE_WIDTH*** threads participate in calculating
 and only safe threads participate in writing output.
 ```c
 if( threadIdx.y < O_TILE_WIDTH && threadIdx.x < O_TILE_WIDTH && (row < numRows) && (col < numCols) ){
+...
+}
 ```
 In ***gaussian_blur*** kernel function, I used shared memeory do get fast memeory access time.
 
