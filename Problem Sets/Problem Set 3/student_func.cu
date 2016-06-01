@@ -245,17 +245,24 @@ __global__ void prefixSum_HPP(const unsigned int * const d_in, unsigned int * co
 	// Reduction Phase
 	for(unsigned int stride = 1; stride < blockDim.x/2; stride <<= 1){
 		// first update all idx == 2n-1, then 4n-1, then 8n-1 ...  
-		// finaly blockDim.x/2 * n - 1(only 1 value will be updated partial[blockDim.x-1])
+		// finaly 2(blockDim.x/2) * n - 1(only 1 value will be updated partial[blockDim.x-1])
 		int idx = (tid+1)*stride*2 - 1;
 		if( idx  < blockDim.x)
 			partial[idx] += partial[idx-stride];
 		// make sure all operations at one stage are done!
 		__syncthreads();
 	}
+	// Example:
+	// After reduction phase , position at 0, 1, 3, 7, ... has their final values (blockDim.x == 8)
+	// then we update values reversely.
+	// first use position 3's value to update position 5(stride == 2 == blockDim.x/4, idx == 3 == (0+1)*2*2-1, only 1 thread do calculation)
+	// then use position 1 to update postion 2 , position 3 to update position 4, position 5 to update position 6
+	//			(stride == 1 == blockDim.x/8, idx == (0+1)*1*2-1=1,(1+1)*1*2-1=3, (2+1)*1*2-1=5, 3 threads do calculation)
 
 	// Post Reduction Reverse Phase
 	for(unsigned int stride = blockDim.x/4; stride > 0; stride >>= 1){
-		// first update all idx == blockDim.x * n - 1, then (blockDim.x/2)n-1, then (blockDim.x/4)n-1 ...  
+		// first update all idx == 2(blockDim.x/4) * n - 1 + blockDim.x/4, 
+		// then 2(blockDim.x/8)n-1+blockDim.x/8, then 2(blockDim.x/16)n-1 + blockDim.x/16...  
 		// finaly 2 * n - 1
 		int idx = (tid+1)*stride*2 - 1;
 		if( idx + stride  < blockDim.x)
