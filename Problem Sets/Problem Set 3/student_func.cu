@@ -81,6 +81,113 @@
 
 #include "utils.h"
 
+__global__ void reduce_max_min(const float* const d_in, float* d_out, bool is_max=true)
+{
+	extern __shared__ float partial[];
+
+	int tid = threadIdx.x;
+	int idx = blockIdx.x *  blockDim.x + tid;
+
+	partial[tid] = d_in[idx];
+	// make sure all data in this block has loaded into shared memory
+	__syncthreads();
+	
+	for(unsigned int stride = blockDim.x / 2; stride > 0; stride >>= 1){
+		if(tid < stride){
+			if(is_max)
+				partial[tid] = max(partial[tid], partial[tid+stride]);	
+			else
+				partial[tid] = min(partial[tid], partial[tid+stride]);	
+		}
+		// make sure all operations at one stage are done!
+		__syncthreads();
+	}
+	
+
+	if(tid == 0)
+		d_out[blockIdx.x] = partial[tid];
+}
+
+void reduce(const float* const d_in,float &min_logLum,float &max_logLum,const size_t numRows,const size_t numCols)
+{
+
+	const int BLOCK_SIZE = numCols;
+	const int GRID_SIZE  = numRows;
+		// declare GPU memory pointers
+	float * d_intermediate, *d_max, *d_min;
+		
+	// allocate GPU memory
+	cudaMalloc((void **) &d_intermediate, GRID_SIZE*sizeof(float));
+	cudaMalloc((void **) &d_max, sizeof(float));
+	cudaMalloc((void **) &d_min, sizeof(float));
+
+	// find maximum;
+	// firstly, find the maximum in each block
+	reduce_max_min<<<GRID_SIZE,BLOCK_SIZE, BLOCK_SIZE*sizeof(float)>>>(d_in, d_intermediate, true);
+	// then, find the global maximum
+	reduce_max_min<<<1, GRID_SIZE, GRID_SIZE*sizeof(float)>>>(d_intermediate, d_max, true);
+
+	checkCudaErrors(cudaMemset(d_intermediate,0,GRID_SIZE*sizeof(float)));
+	// find minimum;
+	// firstly, find the minimum in each block
+	reduce_max_min<<<GRID_SIZE,BLOCK_SIZE, BLOCK_SIZE*sizeof(float)>>>(d_in, d_intermediate,false);
+	// then, find the global minimum
+	reduce_max_min<<<1, GRID_SIZE, GRID_SIZE*sizeof(float)>>>(d_intermediate, d_min, false);
+	
+
+	// transfer the output to CPU
+	checkCudaErrors(cudaMemcpy(&max_logLum, d_max, sizeof(float), cudaMemcpyDeviceToHost));
+	checkCudaErrors(cudaMemcpy(&min_logLum, d_min, sizeof(float), cudaMemcpyDeviceToHost));
+
+	// free GPU memory location
+	checkCudaErrors(cudaFree(d_intermediate));
+	checkCudaErrors(cudaFree(d_max));
+	checkCudaErrors(cudaFree(d_min));
+
+	return;	
+}
+
+
+__global__ void hist(const float* const d_in, unsigned int * const d_out, const float logLumRange, const int min_logLum, const int numBins)
+{
+	int idx = blockIdx.x * blockDim.x + threadIdx.x;
+	float num = d_in[idx];
+	int bin_idx = (num - min_logLum)/logLumRange*numBins;
+	if(bin_idx >= numBins)
+		bin_idx--;
+	atomicAdd(&(d_out[bin_idx]),1);
+	
+}
+
+
+// Hillis Steele Scan
+__global__ void prefixSum_HS(const unsigned int * const d_in, unsigned int * const d_out)
+{
+
+	extern __shared__ float partial[];
+
+	int tid = threadIdx.x;
+	int idx = blockIdx.x * blockDim.x + tid;
+
+	// make sure all data in this block are loaded into shared shared memory
+	partial[tid] = d_in[idx];
+	__syncthreads();
+	
+	for(unsigned int stride = 1; stride < blockDim.x; stride <<= 1){
+		if(tid + stride < blockDim.x)
+			partial[tid+stride] += partial[tid];
+		// make sure all operations at one stage are done!
+		__syncthreads();
+	}
+
+	// exclusive scan
+	if(tid == 0)
+		d_out[tid] = 0;
+	else
+		d_out[tid] = partial[tid-1];	
+}
+
+
 void your_histogram_and_prefixsum(const float* const d_logLuminance,
                                   unsigned int* const d_cdf,
                                   float &min_logLum,
@@ -101,4 +208,25 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
        incoming d_cdf pointer which already has been allocated for you)       */
 
 
+	
+	// Step 1 : find minimum and maximum value
+	reduce(d_logLuminance, min_logLum, max_logLum, numRows, numCols);
+
+	// Step 2: find the range 
+	float logLumRange = max_logLum - min_logLum;
+
+	// Step 3 : generate a histogram of all the values
+	// declare GPU memory pointers
+	unsigned int  *d_bins;
+	// allocate GPU memory
+	checkCudaErrors(cudaMalloc((void **) &d_bins, numBins*sizeof(unsigned int)));
+	checkCudaErrors(cudaMemset(d_bins,0,numBins*sizeof(unsigned int)));
+	
+	hist<<<numRows, numCols>>>(d_logLuminance, d_bins, logLumRange, min_logLum, numBins);
+	
+	// Step 4 : prefix sum
+	prefixSum_HS<<<1, numBins, numBins*sizeof(unsigned int)>>>(d_bins, d_cdf);
+
+	// free GPU memory allocation
+	checkCudaErrors(cudaFree(d_bins));
 }
